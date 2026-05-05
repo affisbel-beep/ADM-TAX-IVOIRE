@@ -1,0 +1,798 @@
+
+9.1 INTEGRATION ORANGE MONEY
+──────────────────────────────────────────────────────────────────────────────────────
+
+class OrangeMoneyService {
+  static const String BASE_URL = 'https://api.orange.com/orange-money-webpay/dev/v1';
+  static const String MERCHANT_KEY = 'VOTRE_CLE_MERCHANT';
+
+  // Recharge du compte chauffeur
+  static Future<PaymentResult> initiateRecharge({
+    required String phoneNumber,
+    required int amount,
+    required String reference,
+  }) async {
+    try {
+      final response = await Dio().post(
+        '$BASE_URL/payment',
+        data: {
+          'merchant_key': MERCHANT_KEY,
+          'currency': 'OUV',
+          'order_id': reference,
+          'amount': amount,
+          'return_url': 'admtax://payment/callback',
+          'cancel_url': 'admtax://payment/cancel',
+          'notif_url': 'https://api.admtax-ivoire.com/webhooks/orange-money',
+          'lang': 'fr',
+          'reference': 'Recharge ADM Tax - $reference',
+        },
+        options: Options(
+          headers: {
+            'Authorization': 'Bearer ${await _getAccessToken()}',
+            'Content-Type': 'application/json',
+          },
+        ),
+      );
+
+      if (response.statusCode == 201) {
+        return PaymentResult(
+          success: true,
+          paymentUrl: response.data['payment_url'],
+          transactionId: response.data['payment_id'],
+          message: 'Paiement initié, en attente confirmation',
+        );
+      }
+
+      return PaymentResult(
+        success: false,
+        message: 'Erreur initiation paiement: ${response.data}',
+      );
+
+    } catch (e) {
+      return PaymentResult(
+        success: false,
+        message: 'Exception: $e',
+      );
+    }
+  }
+
+  static Future<String> _getAccessToken() async {
+    // Récupérer token OAuth2
+    final response = await Dio().post(
+      'https://api.orange.com/oauth/token',
+      data: {
+        'grant_type': 'client_credentials',
+      },
+      options: Options(
+        headers: {
+          'Authorization': 'Basic ${base64Encode(utf8.encode("CLIENT_ID:CLIENT_SECRET"))}',
+        },
+      ),
+    );
+
+    return response.data['access_token'];
+  }
+}
+
+9.2 INTEGRATION WAVE
+──────────────────────────────────────────────────────────────────────────────────────
+
+class WaveService {
+  static const String API_KEY = 'VOTRE_CLE_WAVE';
+  static const String BASE_URL = 'https://api.wave.com/v1';
+
+  static Future<PaymentResult> initiateRecharge({
+    required String phoneNumber,
+    required int amount,
+    required String reference,
+  }) async {
+    try {
+      final response = await Dio().post(
+        '$BASE_URL/checkout/sessions',
+        data: {
+          'amount': amount,
+          'currency': 'XOF',
+          'error_url': 'admtax://payment/error',
+          'success_url': 'admtax://payment/success',
+          'client_reference': reference,
+        },
+        options: Options(
+          headers: {
+            'Authorization': 'Bearer $API_KEY',
+          },
+        ),
+      );
+
+      return PaymentResult(
+        success: true,
+        paymentUrl: response.data['wave_launch_url'],
+        transactionId: response.data['id'],
+      );
+
+    } catch (e) {
+      return PaymentResult(success: false, message: 'Erreur Wave: $e');
+    }
+  }
+}
+
+9.3 INTEGRATION MTN MoMo
+──────────────────────────────────────────────────────────────────────────────────────
+
+class MtnMomoService {
+  static const String BASE_URL = 'https://sandbox.momodeveloper.mtn.com';
+  static const String API_USER = 'VOTRE_API_USER';
+  static const String API_KEY = 'VOTRE_API_KEY';
+  static const String SUBSCRIPTION_KEY = 'VOTRE_SUBSCRIPTION_KEY';
+
+  static Future<PaymentResult> requestPayment({
+    required String phoneNumber,
+    required int amount,
+    required String reference,
+  }) async {
+    try {
+      // 1. Récupérer token
+      final token = await _getToken();
+
+      // 2. Initier paiement
+      final response = await Dio().post(
+        '$BASE_URL/collection/v1_0/requesttopay',
+        data: {
+          'amount': amount.toString(),
+          'currency': 'XOF',
+          'externalId': reference,
+          'payer': {
+            'partyIdType': 'MSISDN',
+            'partyId': phoneNumber,
+          },
+          'payerMessage': 'Recharge ADM Tax Ivoire',
+          'payeeNote': 'Recharge compte chauffeur',
+        },
+        options: Options(
+          headers: {
+            'Authorization': 'Bearer $token',
+            'X-Reference-Id': reference,
+            'X-Target-Environment': 'sandbox',
+            'Ocp-Apim-Subscription-Key': SUBSCRIPTION_KEY,
+          },
+        ),
+      );
+
+      if (response.statusCode == 202) {
+        return PaymentResult(
+          success: true,
+          transactionId: reference,
+          message: 'Demande de paiement envoyée au $phoneNumber',
+        );
+      }
+
+      return PaymentResult(success: false, message: 'Erreur MTN MoMo');
+
+    } catch (e) {
+      return PaymentResult(success: false, message: 'Exception MTN: $e');
+    }
+  }
+
+  static Future<String> _getToken() async {
+    final response = await Dio().post(
+      '$BASE_URL/collection/token/',
+      options: Options(
+        headers: {
+          'Authorization': 'Basic ${base64Encode(utf8.encode("$API_USER:$API_KEY"))}',
+          'Ocp-Apim-Subscription-Key': SUBSCRIPTION_KEY,
+        },
+      ),
+    );
+
+    return response.data['access_token'];
+  }
+}
+
+9.4 GESTION UNIFIEE DES PAIEMENTS
+──────────────────────────────────────────────────────────────────────────────────────
+
+class PaymentManager {
+  static Future<PaymentResult> recharge({
+    required String phoneNumber,
+    required int amount,
+    required PaymentMethod method,
+  }) async {
+    final reference = 'REC-${DateTime.now().millisecondsSinceEpoch}';
+
+    switch (method) {
+      case PaymentMethod.orangeMoney:
+        return OrangeMoneyService.initiateRecharge(
+          phoneNumber: phoneNumber,
+          amount: amount,
+          reference: reference,
+        );
+      case PaymentMethod.wave:
+        return WaveService.initiateRecharge(
+          phoneNumber: phoneNumber,
+          amount: amount,
+          reference: reference,
+        );
+      case PaymentMethod.mtnMomo:
+        return MtnMomoService.requestPayment(
+          phoneNumber: phoneNumber,
+          amount: amount,
+          reference: reference,
+        );
+      case PaymentMethod.agent:
+        return _rechargeByAgent(amount: amount, reference: reference);
+    }
+  }
+
+  static Future<PaymentResult> _rechargeByAgent({
+    required int amount,
+    required String reference,
+  }) async {
+    // L'agent physique scanne un QR code ou entre un code
+    // Validation manuelle côté serveur
+    return PaymentResult(
+      success: true,
+      message: 'Rendez-vous chez un agent ADM Tax avec ce code: $reference',
+    );
+  }
+}
+
+enum PaymentMethod { orangeMoney, wave, mtnMomo, agent }
+
+class PaymentResult {
+  final bool success;
+  final String? paymentUrl;
+  final String? transactionId;
+  final String message;
+
+  PaymentResult({
+    required this.success,
+    this.paymentUrl,
+    this.transactionId,
+    required this.message,
+  });
+}
+
+
+═══════════════════════════════════════════════════════════════════════════════════════
+10. DASHBOARD ADMIN
+═══════════════════════════════════════════════════════════════════════════════════════
+
+10.1 TECHNOLOGIE
+──────────────────────────────────────────────────────────────────────────────────────
+
+• Framework : React.js ou Vue.js (au choix de l'équipe)
+• UI Library : Material-UI (React) ou Vuetify (Vue)
+• Charts : Chart.js ou Recharts
+• Cartes : MapLibre GL JS (web)
+• Auth : JWT + rôles (admin, mairie, operateur)
+
+10.2 FONCTIONNALITES
+──────────────────────────────────────────────────────────────────────────────────────
+
+DASHBOARD OPERATEUR (Toi) :
+• Vue d'ensemble : chauffeurs actifs, trajets aujourd'hui, revenus temps réel
+• Carte live : position des chauffeurs en ligne
+• Anomalies : trajets suspects, fraudes potentielles
+• Finances : revenus par bénéficiaire, virements à effectuer
+• Chauffeurs : liste complète, détails, suspension
+• Paramètres : taxe, commissions, zones
+
+DASHBOARD MAIRIE :
+• Recettes communales : par jour, semaine, mois
+• Carte flux : entrées/sorties de la commune
+• Statistiques : nombre de véhicules, lignes populaires
+• Rapports : PDF mensuel automatique
+• Alertes : véhicules non déclarés, anomalies
+
+DASHBOARD SYNDICAT :
+• Adhérents inscrits à l'app
+• Commission gagnée
+• Performance par chauffeur
+• Alertes groupe
+
+10.3 EXEMPLE D'ECRAN REACT
+──────────────────────────────────────────────────────────────────────────────────────
+
+// Dashboard.jsx - Vue d'ensemble opérateur
+import React, { useEffect, useState } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
+import Map from './components/Map';
+import StatCard from './components/StatCard';
+
+function Dashboard() {
+  const [stats, setStats] = useState({
+    chauffeursActifs: 0,
+    trajetsAujourdhui: 0,
+    revenusAujourdhui: 0,
+    alertesActives: 0,
+  });
+  const [chartData, setChartData] = useState([]);
+
+  useEffect(() => {
+    fetchStats();
+    const interval = setInterval(fetchStats, 30000); // Refresh 30s
+    return () => clearInterval(interval);
+  }, []);
+
+  const fetchStats = async () => {
+    const response = await fetch('/api/dashboard/stats', {
+      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+    });
+    const data = await response.json();
+    setStats(data);
+    setChartData(data.historique7jours);
+  };
+
+  return (
+    <div className="dashboard">
+      <h1>ADM Tax Ivoire - Dashboard</h1>
+
+      {/* Statistiques cards */}
+      <div className="stats-grid">
+        <StatCard 
+          title="Chauffeurs actifs" 
+          value={stats.chauffeursActifs} 
+          icon="users" 
+          color="blue"
+        />
+        <StatCard 
+          title="Trajets aujourd'hui" 
+          value={stats.trajetsAujourdhui} 
+          icon="car" 
+          color="green"
+        />
+        <StatCard 
+          title="Revenus aujourd'hui" 
+          value={`${stats.revenusAujourdhui.toLocaleString()} FCFA`} 
+          icon="money" 
+          color="orange"
+        />
+        <StatCard 
+          title="Alertes actives" 
+          value={stats.alertesActives} 
+          icon="warning" 
+          color="red"
+        />
+      </div>
+
+      {/* Graphique */}
+      <div className="chart-container">
+        <h2>Trajets - 7 derniers jours</h2>
+        <LineChart width={800} height={300} data={chartData}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="date" />
+          <YAxis />
+          <Tooltip />
+          <Legend />
+          <Line type="monotone" dataKey="trajets" stroke="#FF6600" />
+          <Line type="monotone" dataKey="revenus" stroke="#0066CC" />
+        </LineChart>
+      </div>
+
+      {/* Carte */}
+      <div className="map-container">
+        <h2>Chauffeurs en ligne</h2>
+        <Map chauffeurs={stats.chauffeursEnLigne} />
+      </div>
+
+      {/* Table récente */}
+      <div className="table-container">
+        <h2>Derniers trajets</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Chauffeur</th>
+              <th>Début</th>
+              <th>Fin</th>
+              <th>Distance</th>
+              <th>Taxé</th>
+              <th>Confiance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.derniersTrajets.map(trajet => (
+              <tr key={trajet.id}>
+                <td>{trajet.chauffeurNom}</td>
+                <td>{trajet.zoneDebut}</td>
+                <td>{trajet.zoneFin}</td>
+                <td>{trajet.distance}m</td>
+                <td>{trajet.montantTaxe}F</td>
+                <td>
+                  <span className={`badge ${trajet.confidence >= 4 ? 'green' : trajet.confidence >= 3 ? 'yellow' : 'red'}`}>
+                    {trajet.confidence}/5
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+export default Dashboard;
+
+
+═══════════════════════════════════════════════════════════════════════════════════════
+11. SECURITE
+═══════════════════════════════════════════════════════════════════════════════════════
+
+11.1 MESURES DE SECURITE
+──────────────────────────────────────────────────────────────────────────────────────
+
+AUTHENTIFICATION :
+• JWT avec expiration 7 jours
+• Refresh token pour renouvellement automatique
+• Stockage sécurisé (Flutter: flutter_secure_storage)
+• Biométrie optionnelle (empreinte)
+
+COMMUNICATION :
+• HTTPS obligatoire (SSL/TLS)
+• Certificat pinning (évite interception)
+• Rate limiting API (100 req/15min par IP)
+
+DONNEES :
+• Chiffrement AES-256 pour données sensibles
+• Hash bcrypt pour mots de passe
+• Pas de stockage carte bancaire (paiement externalisé)
+
+VALIDATION :
+• Validation stricte des entrées (express-validator)
+• Sanitization SQL (paramétrage requêtes)
+• Protection injection NoSQL
+
+AUDIT :
+• Logs complets (qui, quand, quoi)
+• Alertes anomalies (fraude, intrusion)
+• Backup automatique quotidien
+
+11.2 IMPLEMENTATION JWT FLUTTER
+──────────────────────────────────────────────────────────────────────────────────────
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:jwt_decoder/jwt_decoder.dart';
+
+class AuthService {
+  static const _storage = FlutterSecureStorage();
+  static const _tokenKey = 'jwt_token';
+  static const _refreshKey = 'refresh_token';
+
+  static Future<void> saveToken(String token, String refreshToken) async {
+    await _storage.write(key: _tokenKey, value: token);
+    await _storage.write(key: _refreshKey, value: refreshToken);
+  }
+
+  static Future<String?> getToken() async {
+    return await _storage.read(key: _tokenKey);
+  }
+
+  static Future<bool> isTokenValid() async {
+    final token = await getToken();
+    if (token == null) return false;
+
+    try {
+      return !JwtDecoder.isExpired(token);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<void> logout() async {
+    await _storage.delete(key: _tokenKey);
+    await _storage.delete(key: _refreshKey);
+  }
+
+  static Future<String?> refreshToken() async {
+    final refresh = await _storage.read(key: _refreshKey);
+    if (refresh == null) return null;
+
+    try {
+      final response = await Dio().post(
+        '${ApiService.baseUrl}/auth/refresh',
+        data: { 'refresh_token': refresh },
+      );
+
+      if (response.statusCode == 200) {
+        await saveToken(response.data['token'], response.data['refresh_token']);
+        return response.data['token'];
+      }
+
+      return null;
+
+    } catch (e) {
+      return null;
+    }
+  }
+}
+
+
+═══════════════════════════════════════════════════════════════════════════════════════
+12. DEPLOIEMENT
+═══════════════════════════════════════════════════════════════════════════════════════
+
+12.1 BACKEND (AWS/DigitalOcean)
+──────────────────────────────────────────────────────────────────────────────────────
+
+SERVEUR RECOMMANDE :
+• VPS 2 vCPU, 4 Go RAM, 80 Go SSD (~50 000 FCFA/mois)
+• OS : Ubuntu 22.04 LTS
+• Node.js 18 + PM2 (gestion processus)
+• PostgreSQL 14 + Redis 7
+• Nginx (reverse proxy + SSL Let's Encrypt)
+
+SCRIPT DE DEPLOIEMENT :
+
+#!/bin/bash
+# deploy.sh
+
+echo "🚀 Déploiement ADM Tax Ivoire Backend"
+
+# Mise à jour système
+sudo apt update && sudo apt upgrade -y
+
+# Installation Node.js
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Installation PostgreSQL
+sudo apt install -y postgresql postgresql-contrib
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Installation Redis
+sudo apt install -y redis-server
+sudo systemctl start redis
+sudo systemctl enable redis
+
+# Installation Nginx
+sudo apt install -y nginx
+sudo systemctl start nginx
+sudo systemctl enable nginx
+
+# Configuration PostgreSQL
+sudo -u postgres psql -c "CREATE USER admtax WITH PASSWORD 'votre_mot_de_passe';"
+sudo -u postgres psql -c "CREATE DATABASE admtax_db OWNER admtax;"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE admtax_db TO admtax;"
+
+# Déploiement application
+git clone https://github.com/votre-repo/admtax-backend.git
+cd admtax-backend
+npm install
+npm run migrate
+npm run seed
+
+# PM2 pour gestion processus
+sudo npm install -g pm2
+pm2 start server.js --name "admtax-api"
+pm2 startup
+pm2 save
+
+# Nginx configuration
+sudo tee /etc/nginx/sites-available/admtax <<EOF
+server {
+    listen 80;
+    server_name api.admtax-ivoire.com;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+    }
+}
+EOF
+
+sudo ln -s /etc/nginx/sites-available/admtax /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl restart nginx
+
+# SSL Let's Encrypt
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d api.admtax-ivoire.com --non-interactive --agree-tos --email contact@admtax-ivoire.com
+
+echo "✅ Déploiement terminé !"
+
+12.2 APPLICATION MOBILE
+──────────────────────────────────────────────────────────────────────────────────────
+
+BUILD ANDROID :
+• flutter build apk --release
+• Signer avec keystore
+• Distribution : APK direct (pas Play Store obligatoire)
+  - Site web téléchargement
+  - Partage WhatsApp/Telegram
+  - Agents physiques (installation)
+
+BUILD IOS (si besoin plus tard) :
+• flutter build ios --release
+• App Store (si budget)
+
+DISTRIBUTION :
+• Firebase App Distribution (beta testing)
+• Diawi.com (partage simple)
+• Site web avec QR code
+
+
+═══════════════════════════════════════════════════════════════════════════════════════
+13. TESTS
+═══════════════════════════════════════════════════════════════════════════════════════
+
+13.1 STRATEGIE DE TEST
+──────────────────────────────────────────────────────────────────────────────────────
+
+TESTS UNITAIRES (Flutter) :
+• dart test
+• Tests algorithmes (détection trajets, calculs)
+• Tests modèles (sérialisation, validation)
+
+TESTS D'INTEGRATION (Backend) :
+• Jest + Supertest
+• Tests API (endpoints, auth, validation)
+• Tests base de données (migrations, requêtes)
+
+TESTS END-TO-END :
+• Flutter integration tests
+• Scénario complet : inscription → trajet → prélèvement → sync
+
+TESTS MANUELS (Terrain) :
+• 5 chauffeurs testeurs pendant 2 semaines
+• Feedback quotidien
+• Itérations rapides
+
+13.2 EXEMPLE TEST UNITAIRE (Détection trajet)
+──────────────────────────────────────────────────────────────────────────────────────
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:admtax_ivoire/services/trip_detector.dart';
+
+void main() {
+  group('TripDetector', () {
+    test('Détecte un trajet valide', () {
+      final detector = TripDetector(
+        onTripDetected: (trip) {
+          expect(trip.distanceMeters, greaterThanOrEqualTo(1500));
+          expect(trip.durationSeconds, greaterThanOrEqualTo(300));
+          expect(trip.confidenceScore, greaterThanOrEqualTo(3));
+        },
+        onStateChange: (_) {},
+      );
+
+      // Simuler positions
+      final positions = _generateValidTripPositions();
+      for (var pos in positions) {
+        detector.onNewPosition(pos);
+      }
+    });
+
+    test('Rejette un trajet trop court', () {
+      Trip? detectedTrip;
+
+      final detector = TripDetector(
+        onTripDetected: (trip) => detectedTrip = trip,
+        onStateChange: (_) {},
+      );
+
+      final positions = _generateShortTripPositions();
+      for (var pos in positions) {
+        detector.onNewPosition(pos);
+      }
+
+      expect(detectedTrip, isNull);
+    });
+
+    test('Rejette un trajet trop lent', () {
+      Trip? detectedTrip;
+
+      final detector = TripDetector(
+        onTripDetected: (trip) => detectedTrip = trip,
+        onStateChange: (_) {},
+      );
+
+      final positions = _generateSlowTripPositions();
+      for (var pos in positions) {
+        detector.onNewPosition(pos);
+      }
+
+      expect(detectedTrip?.confidenceScore, lessThan(3));
+    });
+  });
+}
+
+List<Position> _generateValidTripPositions() {
+  // Générer positions simulant un trajet de 2km en 8 min
+  // ...
+}
+
+
+═══════════════════════════════════════════════════════════════════════════════════════
+14. RESSOURCES ET DOCUMENTATION
+═══════════════════════════════════════════════════════════════════════════════════════
+
+14.1 DOCUMENTATION OFFICIELLE
+──────────────────────────────────────────────────────────────────────────────────────
+
+FLUTTER :
+• https://docs.flutter.dev
+• https://pub.dev (packages)
+
+NODE.JS :
+• https://nodejs.org/docs
+• https://expressjs.com
+
+POSTGRESQL :
+• https://www.postgresql.org/docs/current/
+
+MAPLIBRE :
+• https://maplibre.org/projects/maplibre-gl-native/
+
+PAYMENT APIs :
+• Orange Money : https://developer.orange.com/apis/payment-webdev
+• Wave : https://developer.wave.com
+• MTN MoMo : https://momodeveloper.mtn.com
+
+14.2 FORMATIONS RECOMMANDEES
+──────────────────────────────────────────────────────────────────────────────────────
+
+FLUTTER (Gratuit) :
+• Flutter & Dart - The Complete Guide (Udemy) - Angela Yu
+• Flutter Documentation Codelabs (officiel)
+• Reso Coder (YouTube) - Architecture Flutter
+
+NODE.JS (Gratuit) :
+• Node.js, Express, MongoDB Bootcamp (Udemy) - Jonas Schmedtmann
+• The Odin Project (Node.js track)
+
+MOBILE DEVELOPMENT AFRICA :
+• Andela Learning Community (ALC)
+• Google Africa Developer Scholarship
+• Flutter Lagos/Abidjan meetups
+
+14.3 COMMUNAUTES
+──────────────────────────────────────────────────────────────────────────────────────
+
+• Flutter Côte d'Ivoire (WhatsApp/Telegram)
+• Abidjan Tech Community
+• GDG Abidjan (Google Developer Group)
+• CEPICI (Centre de Promotion des Investissements)
+
+14.4 OUTILS DE GESTION DE PROJET
+──────────────────────────────────────────────────────────────────────────────────────
+
+• GitHub (code + issues + projects)
+• Trello ou Notion (gestion tâches)
+• Slack ou Discord (communication équipe)
+• Figma (design collaboratif)
+• Postman (tests API partagés)
+
+
+═══════════════════════════════════════════════════════════════════════════════════════
+CHECKLIST DE LANCEMENT MVP
+═══════════════════════════════════════════════════════════════════════════════════════
+
+□ Semaine 1-2 : Setup environnement, architecture, design Figma
+□ Semaine 3-4 : Carte offline Yopougon, GPS tracking basique
+□ Semaine 5-6 : Détection trajets v1, compte chauffeur, solde
+□ Semaine 7-8 : Offline sync, recharge paiement, dashboard admin basique
+□ Semaine 9-10 : Tests internes, beta 5 chauffeurs, corrections
+□ Semaine 11-12 : Contact syndicat, démo, négociation
+□ Mois 4 : Pilote 20 chauffeurs, collecte feedback intensif
+□ Mois 5 : Convention syndicat, recrutement 100 chauffeurs
+□ Mois 6 : Lancement officiel 500 chauffeurs, marketing
+
+
+═══════════════════════════════════════════════════════════════════════════════════════
+FIN DU GUIDE TECHNIQUE
+═══════════════════════════════════════════════════════════════════════════════════════
+
+Document préparé pour ADM Tax Ivoire
+Date : Mai 2026
+Version : 1.0
+Niveau : Développeur débutant à intermédiaire
+Langage : Dart (Flutter) + JavaScript (Node.js)
+
+"Conduisez malin, gagnez plus"
+"Digitalisons le transport, modernisons la Côte d'Ivoire"
+
+Pour toute question technique : support@admtax-ivoire.com
